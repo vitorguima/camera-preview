@@ -20,8 +20,7 @@
     "prettier": "prettier \"**/*.{css,html,ts,js,java}\" --plugin=prettier-plugin-java",
     "swiftlint": "node-swiftlint",
     "prepublishOnly": "npm run build",
-    "prepare": "husky install && npm run build",
-    "postinstall": "patch-package"
+    "prepare": "husky install && npm run build"
   },
   "author": "Ariel Hernandez Musa",
   "license": "MIT",
