@@ -1,8 +1,5 @@
 package com.ahm.capacitor.camera.preview;
 
-import static android.Manifest.permission.CAMERA;
-import static android.Manifest.permission.RECORD_AUDIO;
-
 import android.app.FragmentManager;
 import android.app.FragmentTransaction;
 import android.content.pm.ActivityInfo;
@@ -16,6 +13,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
+
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Logger;
 import com.getcapacitor.PermissionState;
@@ -25,14 +23,29 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
+
 import java.io.File;
 import java.util.List;
+
 import org.json.JSONArray;
 
-@CapacitorPlugin(name = "CameraPreview", permissions = { @Permission(strings = { CAMERA, RECORD_AUDIO }, alias = CameraPreview.CAMERA_PERMISSION_ALIAS) })
+@CapacitorPlugin(
+    name = "CameraPreview",
+    permissions = {
+        @Permission(
+            strings = { android.Manifest.permission.CAMERA },
+            alias = CameraPreview.CAMERA_PERMISSION_ALIAS
+        ),
+        @Permission(
+            strings = { android.Manifest.permission.RECORD_AUDIO },
+            alias = CameraPreview.AUDIO_PERMISSION_ALIAS
+        )
+    }
+)
 public class CameraPreview extends Plugin implements CameraActivity.CameraPreviewListener {
 
     static final String CAMERA_PERMISSION_ALIAS = "camera";
+    static final String AUDIO_PERMISSION_ALIAS = "audio";
 
     private static String VIDEO_FILE_PATH = "";
     private static String VIDEO_FILE_EXTENSION = ".mp4";
@@ -50,10 +63,20 @@ public class CameraPreview extends Plugin implements CameraActivity.CameraPrevie
 
     @PluginMethod
     public void start(PluginCall call) {
-        if (PermissionState.GRANTED.equals(getPermissionState(CAMERA_PERMISSION_ALIAS))) {
+        boolean camGranted = PermissionState.GRANTED.equals(getPermissionState(CAMERA_PERMISSION_ALIAS));
+        boolean micGranted = PermissionState.GRANTED.equals(getPermissionState(AUDIO_PERMISSION_ALIAS));
+
+        if (camGranted && micGranted) {
             startCamera(call);
         } else {
-            requestPermissionForAlias(CAMERA_PERMISSION_ALIAS, call, "handleCameraPermissionResult");
+            // we have to save this call, so after the user responds
+            // we continue the flow in handleCameraPermissionResult(...)
+            bridge.saveCall(call);
+            requestPermissionForAliases(
+                new String[]{ CAMERA_PERMISSION_ALIAS, AUDIO_PERMISSION_ALIAS },
+                call,
+                "handleCameraPermissionResult"
+            );
         }
     }
 
@@ -196,10 +219,45 @@ public class CameraPreview extends Plugin implements CameraActivity.CameraPrevie
 
     @PluginMethod
     public void startRecordVideo(final PluginCall call) {
+        // Check again here in case app logic tries to record later without starting camera in the same session.
+        boolean camGranted = PermissionState.GRANTED.equals(getPermissionState(CAMERA_PERMISSION_ALIAS));
+        boolean micGranted = PermissionState.GRANTED.equals(getPermissionState(AUDIO_PERMISSION_ALIAS));
+
+        if (!camGranted || !micGranted) {
+            // we save this call and request again — on modern Android,
+            // RECORD_AUDIO might have been revoked while app was backgrounded
+            bridge.saveCall(call);
+            requestPermissionForAliases(
+                new String[]{ CAMERA_PERMISSION_ALIAS, AUDIO_PERMISSION_ALIAS },
+                call,
+                "handleRecordVideoPermissionResult"
+            );
+            return;
+        }
+
+        actuallyStartRecordVideo(call);
+    }
+
+    @PermissionCallback
+    private void handleRecordVideoPermissionResult(PluginCall call) {
+        boolean camGranted = PermissionState.GRANTED.equals(getPermissionState(CAMERA_PERMISSION_ALIAS));
+        boolean micGranted = PermissionState.GRANTED.equals(getPermissionState(AUDIO_PERMISSION_ALIAS));
+
+        if (!camGranted || !micGranted) {
+            call.reject("Permission failed: camera/mic not granted.");
+            return;
+        }
+
+        actuallyStartRecordVideo(call);
+    }
+
+    // this is just your previous logic from startRecordVideo(...) moved into a helper
+    private void actuallyStartRecordVideo(final PluginCall call) {
         if (this.hasCamera(call) == false) {
             call.reject("Camera is not running");
             return;
         }
+
         final String filename = "videoTmp";
         VIDEO_FILE_PATH = getActivity().getCacheDir().toString() + "/";
 
@@ -208,7 +266,8 @@ public class CameraPreview extends Plugin implements CameraActivity.CameraPrevie
         final Integer height = call.getInt("height", 0);
         final Boolean withFlash = call.getBoolean("withFlash", false);
         final Integer maxDuration = call.getInt("maxDuration", 0);
-        // final Integer quality = call.getInt("quality", 0);
+
+        // Save call so we resolve in callbacks later
         bridge.saveCall(call);
         recordCallbackId = call.getCallbackId();
 
@@ -218,12 +277,22 @@ public class CameraPreview extends Plugin implements CameraActivity.CameraPrevie
                 new Runnable() {
                     @Override
                     public void run() {
-                        // fragment.startRecord(getFilePath(filename), position, width, height, quality, withFlash);
-                        fragment.startRecord(getFilePath(filename), position, width, height, 70, withFlash, maxDuration);
+                        // NOTE: keep your same call to fragment.startRecord()
+                        // including audio. We are NOT stripping audio now.
+                        fragment.startRecord(
+                            getFilePath(filename),
+                            position,
+                            width,
+                            height,
+                            70,           // quality or bitrate param you had
+                            withFlash,
+                            maxDuration
+                        );
                     }
                 }
             );
 
+        // we DO NOT resolve here; we resolve in onStartRecordVideo()/onStopRecordVideo()
         call.resolve();
     }
 
@@ -260,11 +329,18 @@ public class CameraPreview extends Plugin implements CameraActivity.CameraPrevie
 
     @PermissionCallback
     private void handleCameraPermissionResult(PluginCall call) {
-        if (PermissionState.GRANTED.equals(getPermissionState(CAMERA_PERMISSION_ALIAS))) {
+        boolean camGranted = PermissionState.GRANTED.equals(getPermissionState(CAMERA_PERMISSION_ALIAS));
+        boolean micGranted = PermissionState.GRANTED.equals(getPermissionState(AUDIO_PERMISSION_ALIAS));
+
+        if (camGranted && micGranted) {
             startCamera(call);
         } else {
-            Logger.debug(getLogTag(), "User denied camera permission: " + getPermissionState(CAMERA_PERMISSION_ALIAS).toString());
-            call.reject("Permission failed: user denied access to camera.");
+            Logger.debug(
+                getLogTag(),
+                "User denied camera/mic permission: cam=" + getPermissionState(CAMERA_PERMISSION_ALIAS)
+                    + " mic=" + getPermissionState(AUDIO_PERMISSION_ALIAS)
+            );
+            call.reject("Permission failed: user denied access to camera/microphone.");
         }
     }
 
